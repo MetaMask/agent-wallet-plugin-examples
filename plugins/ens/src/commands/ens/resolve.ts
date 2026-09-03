@@ -7,12 +7,11 @@ import {
   schemaToArgs,
   schemaToFlags,
 } from "@metamask/agent-wallet/plugin";
-import { type Address, isAddress } from "viem";
+import { type Address, createPublicClient, custom, isAddress } from "viem";
 import { mainnet } from "viem/chains";
 import { normalize } from "viem/ens";
 
 const MAINNET_CHAIN_ID = mainnet.id;
-const UNIVERSAL_RESOLVER_ADDRESS = mainnet.contracts.ensUniversalResolver.address;
 
 const inputs = {
   query: {
@@ -50,13 +49,19 @@ export default class EnsResolve extends PluginCommand<EnsResolution> {
 
   async execute(io: CommandIO): Promise<EnsResolution> {
     const { query } = await io.resolveInputs(inputs);
-    // Host-provided client has no chain definition attached, so pass the
-    // mainnet universal resolver address to the ENS actions explicitly.
-    const client = this.ctx.publicClient(MAINNET_CHAIN_ID);
+    // The host-provided client carries no chain definition, so viem's ENS
+    // actions cannot look up the Universal Resolver themselves. Reuse the
+    // host's transport (and therefore its authenticated RPC) under a
+    // chain-aware client so the resolver address comes from viem's chain
+    // registry rather than being pinned here.
+    const client = createPublicClient({
+      chain: mainnet,
+      transport: custom(this.ctx.publicClient(MAINNET_CHAIN_ID).transport),
+    });
 
     if (isAddress(query)) {
       const name = await client
-        .getEnsName({ address: query as Address, universalResolverAddress: UNIVERSAL_RESOLVER_ADDRESS })
+        .getEnsName({ address: query as Address })
         .catch(rethrowAsRpcError);
       if (!name) {
         throw new CommandError(
@@ -80,7 +85,7 @@ export default class EnsResolve extends PluginCommand<EnsResolution> {
     }
 
     const address = await client
-      .getEnsAddress({ name, universalResolverAddress: UNIVERSAL_RESOLVER_ADDRESS })
+      .getEnsAddress({ name })
       .catch(rethrowAsRpcError);
     if (!address) {
       throw new CommandError("ENS_NAME_NOT_FOUND", `'${name}' does not resolve to an address.`, "Check the spelling of the name.");
