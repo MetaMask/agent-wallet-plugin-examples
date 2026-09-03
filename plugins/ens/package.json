@@ -45,7 +45,7 @@
     "@metamask/agent-wallet": "^6.2.0"
   },
   "dependencies": {
-    "viem": "^2.21.0"
+    "viem": "^2.35.0"
   },
   "devDependencies": {
     "@metamask/agent-wallet": "^6.2.0",
