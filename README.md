@@ -9,6 +9,7 @@ managed as a monorepo.
 | --- | --- | --- |
 | [sample](plugins/sample) | varies | Reference sample demonstrating the plugin API (ping, wallet-read, wallet-submit, reserved capabilities). |
 | [ens](plugins/ens) | `wallet-read` | Resolve ENS names via the Agent Wallet. |
+| [assetfare](plugins/assetfare) | none | Read AssetFare capabilities and request a fail-closed quote with a verified ordered provider path, normalized endpoints, amount continuity, and exact 1bp fee step. |
 
 ## Setup
 

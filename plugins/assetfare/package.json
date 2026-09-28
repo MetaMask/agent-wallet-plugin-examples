@@ -1,0 +1,65 @@
+{
+  "name": "assetfare",
+  "version": "1.0.0",
+  "description": "Read-only AssetFare quotes with verified provider path and sanitized continuation_v3 descriptor for MetaMask Agent Wallet",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "oclif-plugin",
+    "metamask",
+    "agent-wallet",
+    "assetfare",
+    "bridge",
+    "quote"
+  ],
+  "files": [
+    "dist",
+    "oclif.manifest.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && oclif manifest",
+    "manifest:validate": "node scripts/validate-manifest.mjs",
+    "prepack": "npm test && npm run manifest:validate",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "type-check": "tsc -p tsconfig.json --noEmit"
+  },
+  "oclif": {
+    "bin": "mm",
+    "commands": "./dist/commands",
+    "topicSeparator": " ",
+    "topics": {
+      "assetfare": {
+        "description": "Read AssetFare capabilities, verified provider paths, and sanitized continuation_v3 descriptors"
+      }
+    }
+  },
+  "mm": {
+    "schemaVersion": 1,
+    "minCliVersion": "^6.2.0",
+    "capabilities": [],
+    "commands": [
+      {
+        "id": "assetfare:capabilities",
+        "capabilities": [],
+        "dataAccess": []
+      },
+      {
+        "id": "assetfare:quote",
+        "capabilities": [],
+        "dataAccess": []
+      }
+    ]
+  },
+  "peerDependencies": {
+    "@metamask/agent-wallet": "^6.2.0"
+  },
+  "devDependencies": {
+    "@metamask/agent-wallet": "^6.2.0",
+    "oclif": "^4",
+    "typescript": "^5"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}
