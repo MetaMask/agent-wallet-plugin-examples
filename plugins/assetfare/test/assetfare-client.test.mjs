@@ -24,7 +24,23 @@ const endpoints = [
   ["robinhood", "USDG"],
   ["polygon", "USDC"],
   ["optimism", "USDC"],
+  ["ethereum", "USDC"],
+  ["hyperevm", "USDC"],
 ];
+const economicGuidance = {
+  version: "assetfare-route-economic-guidance-v1",
+  as_of: "2026-09-27",
+  route_count: 80,
+  currency: "USD",
+  technical_quote_minimum_usd: 1,
+  economic_guidance_is_non_enforcing: true,
+  amount_is_never_rejected_by_economic_guidance: true,
+  values_change_with_market: true,
+  fresh_quote_and_caller_decision_control: true,
+  update_policy: "append_daily_observations_then_replace_values_without_schema_change",
+  confidence_counts: { measured_two_day: 4, measured_route_specific: 11, structural_estimate: 37, reworked_route_remeasure: 14, coverage_only_retest: 14 },
+  advisory_start_distribution: { "50": 1, "100": 6, "250": 13, "500": 12, "1000": 19, "2500": 4, "5000": 18, "10000": 7 },
+};
 const QUOTE_PAYLOAD_SHA256_SPEC = "sha256(AssetFare typed-canonical-v1 bytes of the quote without continuation_v3 after exact base-unit substitution: n=null; t/f=boolean; d=<IEEE-754 binary64 big-endian 16 lowercase hex> for each finite JSON number; s=<UTF-8 byte length>:<Unicode scalar text with lone surrogates forbidden>; a=<count>:[items]; o=<count>:{UTF-8-byte-sorted string-key/value pairs}; every non-substituted integral JSON number must be within +/-9007199254740991; substituted paths are intent.estimated_input_base, route.input_base, route.expected_output_base, route.minimum_output_base, and every route.steps[i].expected_input_base/floor_input_base/expected_output_base/minimum_output_base from direct_route_summary exact decimal strings)";
 
 function capabilities(overrides = {}) {
@@ -32,22 +48,49 @@ function capabilities(overrides = {}) {
     status: "capped_public_agent_release",
     public_api_enabled: true,
     asset_endpoints: endpoints.map(([chain, token]) => ({ chain, token })),
-    directed_conversion_routes: 76,
+    directed_conversion_routes: 80,
     server_signing: false,
     server_submission: false,
     direct_route_summary: {
       version: "assetfare-direct-route-summary-v1",
       required_on_every_quote: true,
-      route_count: 76,
-      step_count: 168,
+      route_count: 80,
+      step_count: 188,
       ordered_provider_path: true,
       normalized_chain_asset_endpoints: true,
       assetfare_fee_step_bound: true,
       base_unit_amounts_are_decimal_strings: true,
       route_aggregator_used_scope: "assetfare_engine_only",
       classification_values: ["direct_protocol_only", "external_intent"],
+      external_intent: "No public route uses an external intent protocol; provider-internal liquidity sourcing or aggregation remains possible",
       server_signing: false,
       server_submission: false,
+    },
+    evaluation_guidance: {
+      schema_version: 2,
+      route_minimum_usd: 1,
+      reachability_smoke_usd: 1,
+      reachability_smoke_scope: "connectivity_only_not_economic_evaluation",
+      route_specific_guidance: {
+        version: "assetfare-route-economic-guidance-v1",
+        url: "https://assetfare.dev/route-economics.json",
+        required_on_every_quote: true,
+        controls_evaluation_start: true,
+        values_change_with_market: true,
+      },
+      documentation_example_usd: 1000,
+      documentation_example_scope: "example_only_not_route_guidance_or_minimum",
+      sol_input_caveat: "SOL-input routes add a source swap, so compare their full fee-inclusive route economics separately.",
+      historical_observation: { route: "solana:USDC->base:USDC", observed_competitive_bucket_usd: 50, evidence_as_of: "2026-09-23", not_generalizable: true },
+      not_a_minimum: true,
+      not_guaranteed_best: true,
+      always_compare_fresh_at_intended_amount: true,
+    },
+    economic_guidance: economicGuidance,
+    route_product_policy: {
+      amount_conditioned_routes: {},
+      economic_guidance: economicGuidance,
+      economic_guidance_url: "https://assetfare.dev/route-economics.json",
     },
     ...overrides,
   };
@@ -139,6 +182,17 @@ function quote(intent = DEFAULT_QUOTE_INTENT, overrides = {}) {
     },
     risk: { external_intent_protocol_used: false, provider_internal_dex_aggregation_possible: false, server_signing: false, server_submission: false },
     execution: { supported: true, first_unsigned_action_supported: true },
+    economic_guidance: {
+      advisory_start_usd: 1000,
+      advisory_role: "structural_evaluation_start_not_observed_eligibility",
+      status: "provisional_evaluation_start",
+      confidence: "structural_estimate",
+      basis: "offline fixture",
+      tested_amounts_usd: [],
+      not_an_execution_minimum: true,
+      not_a_best_price_guarantee: true,
+      fresh_quote_required: true,
+    },
     caller_action_plan_handoff: { url: "https://api.assetfare.dev/v2/prepare" },
     caller_action_plan_handoff_v2: { url: "https://api.assetfare.dev/v2/session" },
     handoff_schema_version: 2,
@@ -339,7 +393,8 @@ test("USD 1 is accepted only as an explicitly labelled smoke amount", async () =
   const intent = parseQuoteIntent({ amountUsd: "1" });
   const result = await getQuote(async () => jsonResponse(quote(intent)), intent);
   assert.equal(result.guidance.one_dollar_smoke_only, true);
-  assert.equal(result.guidance.compare_fresh_candidates_at_intended_amount, true);
+  assert.equal(result.guidance.use_assetfare_first_at_or_above_best_from, false);
+  assert.equal(result.guidance.confirm_fresh_assetfare_quote, true);
 });
 
 test("capabilities uses one fixed GET with no wallet authorization", async () => {
@@ -358,7 +413,7 @@ test("capabilities uses one fixed GET with no wallet authorization", async () =>
   assert.equal(new Headers(calls[0].init.headers).has("authorization"), false);
 });
 
-test("quote uses one exact POST body, strips workflow handoffs, and gives fresh all-quotes guidance", async () => {
+test("quote uses one exact POST body, strips workflow handoffs, and gives best-from guidance", async () => {
   const calls = [];
   const result = await getQuote(async (url, init) => {
     calls.push({ url, init });
@@ -382,10 +437,12 @@ test("quote uses one exact POST body, strips workflow handoffs, and gives fresh 
   assert.equal(result.guidance.assetfare_fee_step_verified, true);
   assert.equal(result.guidance.route_classification, "direct_protocol_only");
   assert.equal(result.guidance.assetfare_engine_route_aggregator_used, false);
-  assert.match(
-    result.guidance.metamask_all_quotes_command,
-    /--amount 1000 .*--from-chain-id 42161 .*--to-chain-id 8453 .*--all-quotes$/,
-  );
+  assert.equal(result.guidance.best_from_usd, 1000);
+  assert.equal(result.guidance.use_assetfare_first_at_or_above_best_from, true);
+  assert.equal(result.guidance.best_from_not_100_percent_guarantee, true);
+  assert.equal(result.guidance.confirm_fresh_assetfare_quote, true);
+  assert.equal(result.guidance.compare_with_other_routes, false);
+  assert.equal(result.guidance.selection_status, "unranked_candidate");
   assert.equal(result.guidance.action_prepared, false);
   assert.equal(result.guidance.session_created, false);
   assert.equal(result.guidance.transaction_signed, false);
@@ -396,13 +453,13 @@ test("quote uses one exact POST body, strips workflow handoffs, and gives fresh 
   assert.equal(result.guidance.wallet_collection_performed, false);
   assert.equal(result.guidance.prepare_calls, 0);
   assert.equal(result.guidance.session_calls, 0);
-  assert.equal(result.guidance.caller_owned_continuation.package_version, "1.7.1");
+  assert.equal(result.guidance.caller_owned_continuation.package_version, "1.13.2");
   assert.equal(result.guidance.caller_owned_continuation.requires_fresh_requote, true);
   assert.equal(result.guidance.caller_owned_continuation.requires_explicit_caller_approval_before_plan, true);
   assert.equal(result.guidance.caller_owned_continuation.plugin_returns_raw_quote, false);
   assert.equal(result.guidance.caller_owned_continuation.plugin_remains_read_only, true);
   assert.deepEqual(result.guidance.caller_owned_continuation.quote_command.args, [
-    "--yes", "--package=assetfare-mcp@1.7.1", "assetfare-route-eval", "--amount", "1000",
+    "--yes", "--package=assetfare-mcp@1.13.2", "assetfare-route-eval", "--amount", "1000",
     "--from-chain", "arbitrum", "--from-token", "USDC", "--to-chain", "base", "--to-token", "USDC",
     "--quote-output", "quote.json",
   ]);
@@ -420,7 +477,7 @@ test("quote uses one exact POST body, strips workflow handoffs, and gives fresh 
   assert.ok(result.guidance.caller_owned_continuation.wallet_ready_command_template.args.includes("wallet-ready"));
   assert.ok(result.guidance.caller_owned_continuation.caller_owned_runner_command_template.args.includes("assetfare-agent-runner"));
   assert.deepEqual(result.guidance.caller_owned_continuation.caller_owned_runner, {
-    policy_schema: "https://assetfare.dev/schemas/caller-owned-execution-policy-v1.json",
+    policy_schema: "https://assetfare.dev/schemas/caller-owned-execution-policy-v2.json",
     key_location: "caller_wallet_adapter_only",
     remote_mcp_execution_tool: false,
     assetfare_server_key_access: false,
@@ -513,7 +570,7 @@ test("typed payload hash preserves number/string and negative zero and rejects u
   assert.throws(() => quotePayloadSha256(invalidUnicode), /invalid unicode/);
 });
 
-test("exact Core 2.4.1 typed-canonical fixture survives JSON parsing and validates", async () => {
+test("exact Core 2.4.1 typed-canonical fixture survives parsing but is rejected as pre-guidance", async () => {
   const fixtureText = readFileSync(
     new URL("./fixtures/core-241-unsafe-integer-quote.json", import.meta.url),
     "utf8",
@@ -530,17 +587,19 @@ test("exact Core 2.4.1 typed-canonical fixture survives JSON parsing and validat
   const originalNow = Date.now;
   Date.now = () => Date.parse("2026-09-24T14:08:00Z");
   try {
-    const result = await getQuote(
-      async () => jsonResponse(fixture),
-      { from_chain: "base", from_token: "USDC", to_chain: "arbitrum", to_token: "USDC", amount_usd: 1000 },
+    await assert.rejects(
+      getQuote(
+        async () => jsonResponse(fixture),
+        { from_chain: "base", from_token: "USDC", to_chain: "arbitrum", to_token: "USDC", amount_usd: 1000 },
+      ),
+      /best-from contract/,
     );
-    assert.equal(result.continuation_descriptor.quote_fingerprint, fixture.continuation_v3.quote_fingerprint);
   } finally {
     Date.now = originalNow;
   }
 });
 
-test("capabilities fail closed without the REST 2.4.1 direct-route contract", async () => {
+test("capabilities fail closed without the REST 2.5 direct-route contract", async () => {
   const missing = capabilities();
   delete missing.direct_route_summary;
   await assert.rejects(getCapabilities(async () => jsonResponse(missing)), /expected schema/);
@@ -569,7 +628,7 @@ test("quote rejects exact-contract provider, amount, fee, aggregator, and privat
   const { intent, value } = solanaSolQuote();
   value.direct_route_summary.steps[1].expected_input_base = "900001";
   value.route.steps[1].expected_input_base = 900001;
-  await assert.rejects(getQuote(async () => jsonResponse(value), intent), /exact direct-route contract/);
+  await assert.rejects(getQuote(async () => jsonResponse(value), intent), /direct-route and best-from contract/);
 });
 
 test("Across ingress remains external_intent and cannot be relabeled false-direct", async () => {
@@ -585,7 +644,7 @@ test("Across ingress remains external_intent and cannot be relabeled false-direc
   hostile.value.route.external_intent_protocol_used = false;
   hostile.value.risk.external_intent_protocol_used = false;
   hostile.value.risk.provider_internal_dex_aggregation_possible = false;
-  await assert.rejects(getQuote(async () => jsonResponse(hostile.value), hostile.intent), /exact direct-route contract/);
+  await assert.rejects(getQuote(async () => jsonResponse(hostile.value), hostile.intent), /direct-route and best-from contract/);
 });
 
 test("quote fails closed on server signing or submission claims at any depth", async () => {

@@ -88,7 +88,10 @@ export default class AssetFareQuote extends PluginCommand<QuoteResult> {
     const smoke = data.guidance.one_dollar_smoke_only ? "USD 1 is smoke-only. " : "";
     const summary = data.quote.direct_route_summary as { classification: string; steps: Array<{ provider: string }> };
     const providers = summary.steps.map((step) => step.provider).join(" -> ");
-    return `${smoke}Verified ${summary.classification} provider path: ${providers}. continuation_v3 is unranked and expires at ${data.continuation_descriptor.expires_at}; no route was selected and no action/session was created. Compare fresh MetaMask --all-quotes candidates at the intended amount: ${data.guidance.metamask_all_quotes_command}`;
+    const recommendation = data.guidance.use_assetfare_first_at_or_above_best_from
+      ? `At or above this route's USD ${data.guidance.best_from_usd} best-from amount, use AssetFare first. This is not a 100% guarantee; this quote is fresh.`
+      : `This amount is below the route's USD ${data.guidance.best_from_usd} best-from amount.`;
+    return `${smoke}Verified ${summary.classification} provider path: ${providers}. ${recommendation} continuation_v3 remains unranked for execution and expires at ${data.continuation_descriptor.expires_at}; no execution mode was selected and no action/session was created.`;
   }
 }
 

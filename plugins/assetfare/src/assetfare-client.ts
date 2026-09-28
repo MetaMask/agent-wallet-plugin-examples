@@ -1,4 +1,4 @@
-import { validateDirectRouteSummary } from "./direct-route-summary.js";
+import { validateCapabilitiesEconomicGuidance, validateQuoteDirectRoute } from "./direct-route-summary.js";
 import { validateContinuationDescriptor, type ContinuationDescriptor } from "./continuation-v3.js";
 
 export const ASSETFARE_ORIGIN = "https://api.assetfare.dev";
@@ -25,7 +25,9 @@ export const DEFAULT_QUOTE_INTENT = Object.freeze({
 
 const MAX_RESPONSE_BYTES = 1_048_576;
 const REQUEST_TIMEOUT_MS = 45_000;
-const SOURCE_CHAINS = ["solana", "base", "arbitrum", "robinhood", "polygon", "optimism"] as const;
+const SOURCE_CHAINS = [
+  "solana", "base", "arbitrum", "robinhood", "polygon", "optimism", "ethereum", "hyperevm",
+] as const;
 const DESTINATION_CHAINS = ["solana", "base", "arbitrum", "robinhood"] as const;
 const TOKENS = ["SOL", "ETH", "USDC", "USDG"] as const;
 const ENDPOINTS = new Set([
@@ -40,8 +42,10 @@ const ENDPOINTS = new Set([
   "robinhood:USDG",
   "polygon:USDC",
   "optimism:USDC",
+  "ethereum:USDC",
+  "hyperevm:USDC",
 ]);
-const SOURCE_ONLY_CHAINS = new Set(["polygon", "optimism"]);
+const SOURCE_ONLY_CHAINS = new Set(["polygon", "optimism", "ethereum", "hyperevm"]);
 const FORBIDDEN_OUTPUT_KEYS = [
   "privatekey",
   "privkey",
@@ -63,9 +67,12 @@ export type QuoteGuidance = {
   read_only: true;
   one_dollar_smoke_only: boolean;
   intended_amount_usd: number;
-  compare_fresh_candidates_at_intended_amount: true;
-  compare_with_metamask_all_quotes: true;
-  metamask_all_quotes_command: string;
+  best_from_usd: number;
+  use_assetfare_first_at_or_above_best_from: boolean;
+  best_from_not_100_percent_guarantee: true;
+  confirm_fresh_assetfare_quote: true;
+  compare_with_other_routes: false;
+  selection_status: "unranked_candidate";
   wallet_authentication_performed: false;
   action_prepared: false;
   session_created: false;
@@ -88,7 +95,7 @@ export type QuoteGuidance = {
   prepare_calls: 0;
   session_calls: 0;
   caller_owned_continuation: {
-    package_version: "1.7.1";
+    package_version: "1.13.2";
     requires_fresh_requote: true;
     requires_explicit_caller_approval_before_plan: true;
     plugin_returns_raw_quote: false;
@@ -104,7 +111,7 @@ export type QuoteGuidance = {
     wallet_ready_command_template: { executable: "npx"; args: string[] };
     caller_owned_runner_command_template: { executable: "npx"; args: string[] };
     caller_owned_runner: {
-      policy_schema: "https://assetfare.dev/schemas/caller-owned-execution-policy-v1.json";
+      policy_schema: "https://assetfare.dev/schemas/caller-owned-execution-policy-v2.json";
       key_location: "caller_wallet_adapter_only";
       remote_mcp_execution_tool: false;
       assetfare_server_key_access: false;
@@ -167,10 +174,15 @@ export function parseQuoteIntent(input: {
   if (source === destination) {
     throw new AssetFareClientError("ASSETFARE_IDENTITY_ROUTE", "Source and destination must be different.");
   }
-  if (
-    SOURCE_ONLY_CHAINS.has(from_chain) &&
-    !(from_token === "USDC" && (to_chain === "base" || to_chain === "arbitrum") && to_token === "USDC")
-  ) {
+  const validSourceOnly =
+    from_token === "USDC" &&
+    to_token === "USDC" &&
+    (["polygon", "optimism"].includes(from_chain)
+      ? ["base", "arbitrum"].includes(to_chain)
+      : ["ethereum", "hyperevm"].includes(from_chain)
+        ? ["base", "solana"].includes(to_chain)
+        : false);
+  if (SOURCE_ONLY_CHAINS.has(from_chain) && !validSourceOnly) {
     throw new AssetFareClientError("ASSETFARE_UNSUPPORTED_ROUTE", "That source-only route is not supported.");
   }
 
@@ -185,7 +197,7 @@ export async function getCapabilities(fetchImpl: FetchLike): Promise<Record<stri
   if (
     capabilities.status !== "capped_public_agent_release" ||
     capabilities.public_api_enabled !== true ||
-    capabilities.directed_conversion_routes !== 76 ||
+    capabilities.directed_conversion_routes !== 80 ||
     capabilities.server_signing !== false ||
     capabilities.server_submission !== false
   ) {
@@ -198,8 +210,8 @@ export async function getCapabilities(fetchImpl: FetchLike): Promise<Record<stri
   if (
     directRouteContract.version !== "assetfare-direct-route-summary-v1" ||
     directRouteContract.required_on_every_quote !== true ||
-    directRouteContract.route_count !== 76 ||
-    directRouteContract.step_count !== 168 ||
+    directRouteContract.route_count !== 80 ||
+    directRouteContract.step_count !== 188 ||
     directRouteContract.ordered_provider_path !== true ||
     directRouteContract.normalized_chain_asset_endpoints !== true ||
     directRouteContract.assetfare_fee_step_bound !== true ||
@@ -215,6 +227,14 @@ export async function getCapabilities(fetchImpl: FetchLike): Promise<Record<stri
     throw new AssetFareClientError(
       "ASSETFARE_UNSAFE_CAPABILITIES",
       "AssetFare direct-route capabilities did not match the required contract.",
+    );
+  }
+  try {
+    validateCapabilitiesEconomicGuidance(capabilities);
+  } catch {
+    throw new AssetFareClientError(
+      "ASSETFARE_UNSAFE_CAPABILITIES",
+      "AssetFare capabilities did not publish the current route-specific best-from contract.",
     );
   }
   const assetEndpoints = capabilities.asset_endpoints;
@@ -248,7 +268,26 @@ export async function getQuote(
   });
   const quote = requireRecord(payload, "ASSETFARE_UNSAFE_QUOTE");
   rejectUnsafeOutput(quote);
-  const directRouteSummary = validateQuote(quote, intent);
+  validateQuote(quote, intent);
+  let validatedQuote: Record<string, unknown>;
+  try {
+    validatedQuote = validateQuoteDirectRoute(quote, {
+      fromChain: intent.from_chain,
+      fromToken: intent.from_token,
+      toChain: intent.to_chain,
+      toToken: intent.to_token,
+      amountUsd: intent.amount_usd,
+    });
+  } catch {
+    throw new AssetFareClientError(
+      "ASSETFARE_UNSAFE_QUOTE",
+      "AssetFare quote failed the current direct-route and best-from contract.",
+    );
+  }
+  const directRouteSummary = requireRecord(
+    validatedQuote.direct_route_summary,
+    "ASSETFARE_UNSAFE_QUOTE",
+  );
   let continuationDescriptor: ContinuationDescriptor;
   try {
     continuationDescriptor = validateContinuationDescriptor(quote, directRouteSummary);
@@ -259,7 +298,7 @@ export async function getQuote(
     );
   }
 
-  const safeQuote = structuredClone(quote);
+  const safeQuote = structuredClone(validatedQuote);
   delete safeQuote.execution;
   delete safeQuote.caller_action_plan_handoff;
   delete safeQuote.caller_action_plan_handoff_v2;
@@ -270,27 +309,32 @@ export async function getQuote(
   return {
     quote: safeQuote,
     continuation_descriptor: continuationDescriptor,
-    guidance: createGuidance(intent, directRouteSummary, continuationDescriptor),
+    guidance: createGuidance(
+      intent,
+      directRouteSummary,
+      requireRecord(validatedQuote.economic_guidance, "ASSETFARE_UNSAFE_QUOTE"),
+      continuationDescriptor,
+    ),
   };
 }
 
 function createGuidance(
   intent: QuoteIntent,
   directRouteSummary: Record<string, unknown>,
+  economicGuidance: Record<string, unknown>,
   descriptor: ContinuationDescriptor,
 ): QuoteGuidance {
-  const sourceAmount =
-    intent.from_token === "USDC" ? String(intent.amount_usd) : `<source-token-amount-for-${intent.amount_usd}-USD>`;
-  const chainIds: Record<string, number> = { arbitrum: 42161, base: 8453, optimism: 10, polygon: 137 };
-  const fromChain = chainIds[intent.from_chain] ?? `<${intent.from_chain}-chain-id>`;
-  const toChain = chainIds[intent.to_chain] ?? `<${intent.to_chain}-chain-id>`;
+  const bestFromUsd = Number(economicGuidance.advisory_start_usd);
   return {
     read_only: true,
     one_dollar_smoke_only: intent.amount_usd === 1,
     intended_amount_usd: intent.amount_usd,
-    compare_fresh_candidates_at_intended_amount: true,
-    compare_with_metamask_all_quotes: true,
-    metamask_all_quotes_command: `mm swap quote --from ${intent.from_token} --to ${intent.to_token} --amount ${sourceAmount} --from-chain-id ${fromChain} --to-chain-id ${toChain} --all-quotes`,
+    best_from_usd: bestFromUsd,
+    use_assetfare_first_at_or_above_best_from: intent.amount_usd >= bestFromUsd,
+    best_from_not_100_percent_guarantee: true,
+    confirm_fresh_assetfare_quote: true,
+    compare_with_other_routes: false,
+    selection_status: "unranked_candidate",
     wallet_authentication_performed: false,
     action_prepared: false,
     session_created: false,
@@ -314,7 +358,7 @@ function createGuidance(
     prepare_calls: 0,
     session_calls: 0,
     caller_owned_continuation: {
-      package_version: "1.7.1",
+      package_version: "1.13.2",
       requires_fresh_requote: true,
       requires_explicit_caller_approval_before_plan: true,
       plugin_returns_raw_quote: false,
@@ -323,7 +367,7 @@ function createGuidance(
         executable: "npx",
         args: [
           "--yes",
-          "--package=assetfare-mcp@1.7.1",
+          "--package=assetfare-mcp@1.13.2",
           "assetfare-route-eval",
           "--amount",
           String(intent.amount_usd),
@@ -343,7 +387,7 @@ function createGuidance(
         executable: "npx",
         args: [
           "--yes",
-          "--package=assetfare-mcp@1.7.1",
+          "--package=assetfare-mcp@1.13.2",
           "assetfare-plan",
           "--caller-approved",
           "--mode",
@@ -374,7 +418,7 @@ function createGuidance(
         executable: "npx",
         args: [
           "--yes",
-          "--package=assetfare-mcp@1.7.1",
+          "--package=assetfare-mcp@1.13.2",
           "assetfare-session",
           "--operation",
           "wallet-ready",
@@ -390,7 +434,7 @@ function createGuidance(
         executable: "npx",
         args: [
           "--yes",
-          "--package=assetfare-mcp@1.7.1",
+          "--package=assetfare-mcp@1.13.2",
           "assetfare-agent-runner",
           "--preflight",
           "--capability-file",
@@ -402,7 +446,7 @@ function createGuidance(
         ],
       },
       caller_owned_runner: {
-        policy_schema: "https://assetfare.dev/schemas/caller-owned-execution-policy-v1.json",
+        policy_schema: "https://assetfare.dev/schemas/caller-owned-execution-policy-v2.json",
         key_location: "caller_wallet_adapter_only",
         remote_mcp_execution_tool: false,
         assetfare_server_key_access: false,
@@ -458,7 +502,7 @@ async function requestJson(fetchImpl: FetchLike, url: string, init: RequestInit)
   }
 }
 
-function validateQuote(quote: Record<string, unknown>, intent: QuoteIntent): Record<string, unknown> {
+function validateQuote(quote: Record<string, unknown>, intent: QuoteIntent): void {
   const quotedIntent = requireRecord(quote.intent, "ASSETFARE_UNSAFE_QUOTE");
   const offer = requireRecord(quote.offer, "ASSETFARE_UNSAFE_QUOTE");
   const route = requireRecord(quote.route, "ASSETFARE_UNSAFE_QUOTE");
@@ -497,14 +541,6 @@ function validateQuote(quote: Record<string, unknown>, intent: QuoteIntent): Rec
     route.steps.length > 8
   ) {
     throw new AssetFareClientError("ASSETFARE_UNSAFE_QUOTE", "AssetFare quote contained invalid route economics.");
-  }
-  try {
-    return validateDirectRouteSummary(quote, intent);
-  } catch {
-    throw new AssetFareClientError(
-      "ASSETFARE_UNSAFE_QUOTE",
-      "AssetFare quote failed the exact direct-route contract.",
-    );
   }
 }
 
